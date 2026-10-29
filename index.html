@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#171c1c">
+  <meta name="description" content="一场发生在拉特兰的单人文字冒险。追查伪令，救出二十七位居民，在第十三声钟响之前作出选择。">
+  <title>第十三声钟响 · 单人文字探索</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23171c1c'/%3E%3Cellipse cx='32' cy='20' rx='18' ry='6' fill='none' stroke='%23d1b379' stroke-width='3'/%3E%3Cpath d='M21 43h22M25 40V29m7 11V29m7 11V29' stroke='%23d1b379' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <input id="save-file" type="file" accept="application/json,.json" hidden>
+  <script>globalThis.BELL_ASSETS={bakery:'assets/bakery.png',chapel:'assets/chapel.png',tower:'assets/tower.png'};</script>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
