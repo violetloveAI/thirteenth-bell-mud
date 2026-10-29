@@ -10,6 +10,38 @@ const api = () => {
   }
   return engine;
 };
+function followHints(state = api().createGame(), expected = 'good') {
+  const e = api();
+  assert.equal(typeof e.getHint, 'function', 'missing engine behavior: getHint');
+  const seen = new Set();
+  const commands = [];
+  while (!state.ending && commands.length < 65) {
+    const key = JSON.stringify([state.location, state.flags, state.backups]);
+    assert.ok(!seen.has(key), `hint route loops at ${state.location}: ${commands.join(' → ')}`);
+    seen.add(key);
+    const before = JSON.stringify(state);
+    const hint = e.getHint(state);
+    const view = e.getView(state);
+    assert.equal(JSON.stringify(state), before, 'getting a hint must leave the save untouched');
+    assert.deepEqual(Object.keys(hint).sort(), ['command', 'label', 'reason']);
+    assert.ok(hint.label && hint.reason);
+    const choice = [...view.actions, ...view.exits.filter(exit => !exit.locked)].find(option => option.command === hint.command);
+    assert.ok(choice, `hint must be a clickable choice: ${hint.command}`);
+    assert.notEqual(hint.command, '等待');
+    const read = e.execute(state, '提示');
+    assert.equal(read.changed, false);
+    assert.equal(JSON.stringify(read.state), before);
+    assert.ok(read.messages.some(item => item.text.includes(hint.label) && item.text.includes(hint.reason)));
+    assert.deepEqual(view.nextAction, hint);
+    commands.push(hint.command);
+    const result = e.execute(state, hint.command);
+    assert.equal(result.changed, true, `hint should progress: ${hint.command}`);
+    assert.equal(e.validateSave(result.state), true);
+    state = result.state;
+  }
+  assert.equal(state.ending?.id, expected, `hint route did not reach ${expected}: ${commands.join(' → ')}`);
+  return { state, commands };
+}
 const investigation = [
   '观察街道', '去 广场', '调查广播', '查看终端', '核验授权', '比对录像',
 ];
@@ -286,4 +318,69 @@ test('player guidance never asks for typed input', () => {
   }
   while (!state.ending) state = e.execute(state, '等待').state;
   assert.doesNotMatch(e.getView(state).hint, /输入|填写/);
+});
+
+test('next-step hints alone reach S without loops, invisible commands, mutation or time cost', () => {
+  const { state, commands } = followHints();
+  assert.equal(state.rescued, 27);
+  assert.equal(state.backups.length, 3);
+  assert.ok(commands.indexOf('备份证据') < commands.indexOf('转移伤员'), 'use time before the rescue phase transition to preserve evidence');
+  const hint = engine.getHint(state);
+  assert.ok(engine.getView(state).actions.some(a => a.command === hint.command));
+  assert.equal(engine.execute(state, '提示').changed, false);
+});
+
+test('hints recover from missed preparation, early detours and incomplete tower setup', () => {
+  const deviations = [
+    ['观察街道', '去 广场', '去 东侧通道', '检查挡板'],
+    [...investigation, '查看名单', '核对转运记录', '去 礼拜堂', '安排掩护'],
+    [...investigation, ...oldCase, ...rescue.slice(0, 10), '去 钟楼', '质问司钟人'],
+  ];
+  for (const route of deviations) followHints(run(route));
+});
+
+test('time-aware hints skip unreachable old-case detours and still rescue everyone and finish', () => {
+  const start = run([...investigation, ...rescue]);
+  const { state, commands } = followHints(start, 'ordinary');
+  assert.equal(state.rescued, 27);
+  assert.ok(!commands.includes('去 白钟广场'), 'do not send the player back for evidence when that loses the deadline');
+  assert.ok(!commands.includes('备份证据'), 'do not spend scarce time on a backup that cannot improve this ending');
+});
+
+test('when a full stop is no longer possible hints still prioritise reachable civilian rescue', () => {
+  let state = run([...investigation, '查看名单', '核对转运记录', '准备担架', '去 礼拜堂', '安排掩护', '铺设安全通路']);
+  // Reach this deadline through the offered wait option, without forging flags.
+  while (state.minutesLeft > 14) state = engine.execute(state, '等待').state;
+  assert.ok(state.minutesLeft > 8 && state.minutesLeft <= 14);
+  assert.equal(engine.getHint(state).command, '疏散居民');
+  state = run(['疏散居民'], state);
+  assert.equal(engine.getHint(state).command, '转移伤员');
+  state = run(['转移伤员'], state);
+  assert.equal(state.rescued, 27);
+  assert.match(engine.getHint(state).reason, /时间|来不及|剩余/);
+});
+
+test('each recommended story action explains its concrete purpose before the time strategy', () => {
+  const reasons = new Map();
+  let state = api().createGame();
+  for (let step = 0; step < 65 && !state.ending; step++) {
+    const hint = engine.getHint(state);
+    assert.notEqual(hint.command, '等待');
+    if (hint.command.startsWith('去 ')) assert.match(hint.reason, /前往.*接下来需要/);
+    else reasons.set(hint.command, hint.reason.split('。')[0]);
+    state = engine.execute(state, hint.command).state;
+  }
+  assert.equal(state.ending?.id, 'good');
+  assert.equal(new Set(reasons.values()).size, reasons.size, 'distinct actions should not repeat one generic strategy explanation');
+  for (const [command, purpose] of Object.entries({
+    查看终端: /原始录像.*广播/,
+    核验授权: /授权.*范围/,
+    铺设安全通路: /门槛.*担架/,
+    疏散居民: /能.*行走.*担架/,
+    转移伤员: /两名.*无法.*行走/,
+    搜救技师: /技师.*隔离/,
+    备份证据: /副本.*原件/,
+    隔离主控: /非法.*处置/,
+    制止司钟人: /操作柄|再次操作/,
+  })) assert.match(reasons.get(command) || '', purpose, command);
 });

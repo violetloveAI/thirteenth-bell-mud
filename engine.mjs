@@ -171,6 +171,141 @@ const ALIASES = {
   重来: '重新开始', restart: '重新开始', wait: '等待',
 };
 
+// Flags only move forward. Complete necessary work where we already are, then
+// search the actual roads; never search permutations of independent team calls.
+// The rescue's clock jump is modelled explicitly, so early evidence work is not
+// mistaken for an equally cheap detour after 11:30.
+function planMission(source, goal, ignoreDeadline = false) {
+  const optional = ['barrier', 'ian', 'oldCase'];
+  const all = Object.values(ACTIONS);
+  const rescueEnd = goal === 'rescue25' ? 'walking' : goal === 'rescue27' ? 'evacuated' : null;
+  const jobs = (rescueEnd ? all.slice(0, all.findIndex(a => a.flag === rescueEnd) + 1) : all)
+    .filter(a => goal === 'good' || !optional.includes(a.flag));
+  const fullEvidence = s => ['edited', 'oldCase', 'missing'].every(id => s.flags[id]);
+  const complete = s => rescueEnd ? s.flags[rescueEnd] : s.flags.restrained;
+  const step = (s, choice, cost, apply) => {
+    if (!ignoreDeadline && s.minutesLeft <= cost) return false;
+    s.minutesLeft -= cost;
+    s.spent += cost;
+    s.path.push(choice);
+    apply(s);
+    return true;
+  };
+  const prepare = node => {
+    const s = { ...node, flags: { ...node.flags }, path: [...node.path] };
+    let changed;
+    do {
+      changed = false;
+      for (const a of jobs) {
+        if (s.flags[a.flag] || (a.at && !a.at.includes(s.location)) || a.needs?.some(([flag]) => !s.flags[flag])) continue;
+        if (goal === 'good' && ['evacuated', 'restrained'].includes(a.flag) && (!fullEvidence(s) || !s.backedUp)) continue;
+        if (!step(s, { command: a.command, label: a.label }, a.cost, n => {
+          n.flags[a.flag] = true;
+          if (a.flag === 'evacuated') n.minutesLeft = Math.min(n.minutesLeft, 30);
+        })) return null;
+        changed = true;
+        if (complete(s)) return s;
+      }
+      if (goal === 'good' && fullEvidence(s) && !s.backedUp) {
+        if (!step(s, { command: '备份证据', label: '交接证据副本' }, 1, n => { n.backedUp = true; })) return null;
+        changed = true;
+      }
+      if (!rescueEnd && s.flags.evacuated) for (const p of PEOPLE) {
+        if (s.flags[p.flag] || (p.flag === 'controlTeam' && !s.flags.plan) || (p.flag === 'techTeam' && !s.flags.technicians)) continue;
+        if (!step(s, { command: `安排 ${p.name} ${p.task}`, label: `${p.name} · ${p.task}` }, 1, n => { n.flags[p.flag] = true; })) return null;
+        changed = true;
+      }
+    } while (changed);
+    return s;
+  };
+  const first = prepare({ location: source.location, flags: source.flags, minutesLeft: source.minutesLeft, backedUp: source.backups.length === 3, spent: 0, path: [] });
+  if (!first) return null;
+  const queue = [first];
+  const seen = new Map();
+  while (queue.length) {
+    queue.sort((a, b) => a.spent - b.spent || b.minutesLeft - a.minutesLeft);
+    const s = queue.shift();
+    const key = `${s.location}/${FLAG_NAMES.map(flag => +s.flags[flag]).join('')}/${+s.backedUp}`;
+    const prior = seen.get(key) || [];
+    if (prior.some(p => p.spent <= s.spent && p.minutesLeft >= s.minutesLeft)) continue;
+    seen.set(key, [...prior.filter(p => p.spent < s.spent || p.minutesLeft > s.minutesLeft), { spent: s.spent, minutesLeft: s.minutesLeft }]);
+    if (complete(s)) return s.path;
+    for (const pair of CONNECTIONS) {
+      if (!pair.includes(s.location)) continue;
+      const id = pair.find(location => location !== s.location);
+      if (gate(s, id)) continue;
+      const moved = { ...s, path: [...s.path] };
+      if (!step(moved, { command: `去 ${LOCATIONS[id].name}`, label: `前往${LOCATIONS[id].name}` }, 1, n => { n.location = id; })) continue;
+      const next = prepare(moved);
+      if (next) queue.push(next);
+    }
+  }
+  return null;
+}
+
+const HINT_REASONS = {
+  观察街道: '店外的异响打断了早餐，先确认现场发生了什么。',
+  调查广播: '广播指向尚未验收的通道，需要先查清公开命令的内容。',
+  查看终端: '用终端保存的原始录像核对广播，找回被删掉的上下文。',
+  核验授权: '请送葬人核实授权的适用范围，确认维护人员是否有权封锁救援。',
+  比对录像: '把完整录像与授权放在一起，才能证明公开命令经过剪辑并越权。',
+  检查挡板: '通道里传来求救声，先检查挡板与侧门，找到被困者的位置。',
+  救助伊恩: '先把受伤的伊恩扶出危险区域，才能听取证言并查看他保管的材料。',
+  检查防水袋: '伊恩留下的移交单能核实旧事故的验收经过与签字责任。',
+  查看名单: '将系统名单与居民提供的信息对照，找出被遗漏的人。',
+  核对转运记录: '医疗站曾经搬迁，转运记录能确认失联居民现在的位置和救援需求。',
+  准备担架: '两名伤员不能自己走动，出发前带齐担架与急救包。',
+  安排掩护: '看守正在逼近入口，先让同伴守住居民撤离的方向。',
+  铺设安全通路: '门槛已经断裂，先铺平断口，让居民与担架都能安全通过。',
+  疏散居民: '先让能够行走的二十五人离开，为后面的担架腾出通道。',
+  转移伤员: '最后两名伤员无法自行行走，需要用准备好的担架送出礼拜堂。',
+  寻找备用路线: '钟楼侧门的窗口已经错过，请莫斯提马确认屋顶维护路。',
+  搜救技师: '被困技师熟悉设施，救出他们后才能可靠地确认主控隔离结果。',
+  检查控制台: '对照控制台与维护图，查清被篡改的处置流程并明确接管目标。',
+  质问司钟人: '先稳住司钟人，让各处同伴获得完成配合的机会。',
+  授权协同: '四处任务已经分配，把共同目标交给同伴，避免每一步都等待你确认。',
+  确认居民撤离: '先确认最后两副担架已通过北侧通路，防止设施变化影响救援。',
+  隔离主控: '居民已经安全撤离，让菲亚梅塔与技师切断非法处置对主控的影响。',
+  制止司钟人: '主控已经隔离，配合送葬人阻止司钟人再次触碰操作柄。',
+  备份证据: '三组材料已经齐全，先交接可信副本，避免原件受损后失去证据。',
+  '安排 能天使 护送居民': '让能天使守住北侧护送线，并确认最后两副担架离开危险范围。',
+  '安排 莫斯提马 接应技师': '让莫斯提马接应获救技师，使熟悉设施的人能够支援控制室。',
+  '安排 菲亚梅塔 接管控制室': '让菲亚梅塔守住控制台，准备与技师共同隔离非法流程。',
+  '安排 送葬人 核验封锁令': '让送葬人核验封锁令与外援身份，为救援队进入北侧通路创造条件。',
+};
+
+/** A free, deterministic next choice. Commands always match a visible button. */
+export function getHint(state) {
+  const s = validateSave(state) ? state : createGame();
+  if (s.ending) return { command: '日志', label: '回看日志', reason: '本次行动已结束，可以回看经过；再次挑战请点击“重新开始”按钮。' };
+  let plan = planMission(s, 'good');
+  let reason = '时间尚够，可以兼顾救援与完整证据。';
+  if (!plan?.length) {
+    plan = planMission(s, 'ordinary');
+    reason = '时间不足以补齐全部证据，先保住二十七人并制止处置。';
+  }
+  if (!plan?.length) {
+    plan = (!s.flags.evacuated && planMission(s, 'rescue27')) || (!s.flags.walking && planMission(s, 'rescue25'));
+    reason = '时间不足以完成全部处置，先救出仍能转移的居民。';
+  }
+  if (!plan?.length) {
+    plan = planMission(s, 'ordinary', true);
+    reason = '剩余时间已非常紧张，先推进眼前的救援与处置，避免折返。';
+  }
+  const next = plan?.[0];
+  if (!next) return { command: '提示', label: '听取行动建议', reason: '可以查看现场与日志，确认当前行动。' };
+  if (next.command.startsWith('去 ')) {
+    const nextAction = plan.find(item => !item.command.startsWith('去 '));
+    reason = `沿相邻道路前往，接下来需要${nextAction?.label || '完成现场处置'}。${reason}`;
+  } else reason = `${HINT_REASONS[next.command] || ''}${reason}`;
+  return { ...next, reason };
+}
+
+const hintText = s => {
+  const next = getHint(s);
+  return `建议选择“${next.label}”。${next.reason}`;
+};
+
 function nextObjective(s) {
   const f = s.flags;
   if (s.ending) return [s.ending.subtitle, '可以查看日志、背包、地图与图鉴。点击“重新开始”按钮再次挑战。'];
@@ -207,7 +342,7 @@ function description(s) {
 
 function readCommand(s, cmd) {
   if (['查看', '状态'].includes(cmd)) return unchanged(s, `${description(s)}\n当前目标：${nextObjective(s)[0]}`);
-  if (cmd === '提示') return unchanged(s, nextObjective(s)[1]);
+  if (cmd === '提示') return unchanged(s, hintText(s));
   if (cmd === '帮助') return unchanged(s, '选择行动按钮调查现场、准备救援与分配任务；选择相邻出口移动，点击同伴可听取建议。地图、背包、日志与图鉴帮助你回看信息。查看、交谈与已完成行动不耗时，移动和新的行动会推进时间。“等待五分钟”是可选行动，会消耗5分钟。点击“重新开始”按钮可从早餐重来。');
   if (cmd === '地图') return unchanged(s, `你在${LOCATIONS[s.location].name}。相邻地点：${CONNECTIONS.filter(pair => pair.includes(s.location)).map(pair => pair.find(id => id !== s.location)).map(id => `${LOCATIONS[id].name}${gate(s, id) ? '（暂不可达）' : ''}`).join('、')}。`);
   if (cmd === '背包') return unchanged(s, s.inventory.map(id => `${ITEMS[id].name}：${ITEMS[id].description}`).join('\n'));
@@ -226,7 +361,7 @@ export function execute(state, command) {
   if (!cmd) return unchanged(state, '可以查看现场，或选择一个行动按钮。');
   const talkName = cmd.replace(/^(交谈|对话|联系|询问)/, '');
   const person = PEOPLE.find(p => p.name === talkName || p.id === talkName);
-  if (person) return unchanged(state, `${state.flags[person.flag] ? `我正在${person.task}。` : '队内通讯畅通。'}${nextObjective(state)[1]}`, 'npc', person.name);
+  if (person) return unchanged(state, `${state.flags[person.flag] ? `我正在${person.task}。` : '队内通讯畅通。'}${hintText(state)}`, 'npc', person.name);
   if (state.ending) return unchanged(state, '这次行动已经结束。仍可查看地图、图鉴、背包和日志，或点击“重新开始”按钮。');
   if (/^(去|前往|移动到|走向|go)/.test(cmd)) {
     const name = cmd.replace(/^(移动到|前往|走向|去|go)/, '');
@@ -277,7 +412,9 @@ export function execute(state, command) {
 
 export function getView(state) {
   const s = validateSave(state) ? state : createGame();
-  const [objective, hint] = nextObjective(s);
+  const [objective] = nextObjective(s);
+  const nextAction = getHint(s);
+  const hint = `建议选择“${nextAction.label}”。${nextAction.reason}`;
   const exits = CONNECTIONS.filter(pair => pair.includes(s.location)).map(pair => pair.find(id => id !== s.location)).map(id => ({
     id, name: LOCATIONS[id].name, command: `去 ${LOCATIONS[id].name}`, locked: Boolean(s.ending || gate(s, id)), reason: s.ending ? '本次行动已经结束' : gate(s, id),
   }));
@@ -296,7 +433,7 @@ export function getView(state) {
   }
   return {
     location: { id: s.location, ...LOCATIONS[s.location], description: description(s) },
-    chapter: { number: s.chapter, title: CHAPTERS[s.chapter] }, objective, hint, exits, actions,
+    chapter: { number: s.chapter, title: CHAPTERS[s.chapter] }, objective, hint, nextAction, exits, actions,
     inventory: s.inventory.map(id => ({ id, ...ITEMS[id] })),
     companions: PEOPLE.map(({ id, name, role, flag, task }) => ({ id, name, role, status: s.ending ? '行动结束，正在交接与复盘' : s.flags[flag] ? `正在${task}` : '队内通讯在线' })),
     stats: { minutesLeft: s.minutesLeft, rescued: s.rescued, evidence: evidenceIds(s).length, trust: s.trust },

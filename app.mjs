@@ -1,4 +1,4 @@
-import * as Game from './engine.mjs';
+import * as Game from './engine.mjs?v=99a2c39e34';
 
 const ASSETS = globalThis.BELL_ASSETS;
 const SAVE_KEY = 'violet-thirteenth-bell-save-v1';
@@ -55,6 +55,7 @@ let typingFrame = null;
 let typingNodes = [];
 let introStep = 0;
 let introStartsNewGame = true;
+let shownHint = null;
 
 function validHistory(value) {
   return Array.isArray(value) && value.length <= 160 && value.every(entry => entry &&
@@ -82,7 +83,7 @@ try {
 } catch {}
 
 function applySettings() {
-  document.documentElement.style.setProperty('--story-size', { small: '14px', normal: '16px', large: '18px' }[settings.text]);
+  document.documentElement.style.setProperty('--story-size', { small: '14px', normal: '18px', large: '21px' }[settings.text]);
 }
 function toast(message) {
   clearTimeout(toastTimer);
@@ -197,6 +198,7 @@ function showDialog(title, body, className = '') {
   dialog.className = className;
   dialog.innerHTML = `<div class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-ui="close" aria-label="关闭">${icon('close')}</button></div>${body}`;
   if (!dialog.open) dialog.showModal();
+  dialog.scrollTop=0;
 }
 
 function renderTitle() {
@@ -258,9 +260,16 @@ function clockTime(minutesLeft) {
   const passed = Math.max(0, 720 - Math.max(0, Number(minutesLeft) || 0));
   return `${String(Math.floor(passed / 60)).padStart(2, '0')}:${String(passed % 60).padStart(2, '0')}`;
 }
-function logHTML(animateFrom=Infinity) {
+function latestTurnStart() {
+  for (let index=history.length-1; index>=0; index--) {
+    if (history[index].kind==='command') return index;
+  }
+  return 0;
+}
+function logHTML(animateFrom=Infinity, all=false) {
+  const from=all ? 0 : latestTurnStart();
   const animate=!matchMedia('(prefers-reduced-motion: reduce)').matches;
-  return history.map((entry,index) => `<div class="log-entry ${esc(entry.kind)}">${entry.speaker ? `<span class="speaker">${esc(entry.speaker)}</span>` : ''}<span class="log-copy" data-log-copy="${index}">${animate && index>=animateFrom && entry.kind!=='command' ? '' : esc(entry.text)}</span></div>`).join('');
+  return history.map((entry,index) => index<from ? '' : `<div class="log-entry ${esc(entry.kind)}">${entry.speaker ? `<span class="speaker">${esc(entry.speaker)}</span>` : ''}<span class="log-copy" data-log-copy="${index}">${animate && index>=animateFrom && entry.kind!=='command' ? '' : esc(entry.text)}</span></div>`).join('');
 }
 function renderEnding(ending) {
   if (!ending) return '';
@@ -276,29 +285,74 @@ function renderGame({ focus = false, preserveScroll = false, animateFrom=Infinit
   const actions = [
     ...(view.actions || []).filter(action => !['提示','等待'].includes(action.command)),
     ...(view.exits || []).filter(exit => !exit.locked).map(exit => ({label:`前往${exit.name}`,command:exit.command})),
-    ...(!view.ending ? [{label:'听取行动建议',command:'提示'}] : []),
+    ...(!view.ending ? [{label:'卡住了？查看提示',command:'提示'}] : []),
     ...(view.actions || []).filter(action => action.command === '等待'),
-  ].slice(0, 10);
-  root.innerHTML = `<header class="main-header"><button class="text-button" data-ui="title" style="padding:0;text-align:left" aria-label="返回标题">${brand()}</button><div class="header-right"><span class="saved-status"><span class="dot"></span>${storageAvailable ? '旅程已自动保存' : '可导出存档'}</span><span class="header-divider"></span><button class="text-button" data-ui="help">${icon('help')}游玩指南</button><button class="icon-button" data-ui="settings" aria-label="设置与存档">${icon('settings')}</button></div></header>
+  ];
+  const markup = `<header class="main-header"><button class="text-button" data-ui="title" style="padding:0;text-align:left" aria-label="返回标题">${brand()}</button><div class="header-right"><span class="saved-status"><span class="dot"></span>${storageAvailable ? '旅程已自动保存' : '可导出存档'}</span><span class="header-divider"></span><button class="text-button" data-ui="help">${icon('help')}游玩指南</button><button class="icon-button" data-ui="settings" aria-label="设置与存档">${icon('settings')}</button></div></header>
     <main class="workspace fade-in"><section class="story-column" aria-label="故事与行动">
       <div class="chapter-heading"><div class="eyebrow"><b>CHAPTER ${chapterNumber(view.chapter.number)}</b>${esc(view.chapter.title)}</div><span class="location-path">拉特兰 / 白钟区 / ${esc(view.location.name)}</span></div>
       <div class="scene" role="button" tabindex="0" data-cg="${cg}" aria-label="放大${esc(CG[cg].title)}插画"><img src="${ASSETS[cg]}" alt="${esc(CG[cg].title)}"><div class="scene-num">${Object.keys(CG).map(id => `<i class="${cg === id ? 'active' : ''}"></i>`).join('')}</div><div class="scene-title"><div><div class="eyebrow">${esc(view.location.kicker || 'LATERANO · WHITE BELL DISTRICT')}</div><h1>${esc(view.location.name)}</h1></div><span class="scene-mark">${icon('image')}SCENE ${CG[cg].number}</span></div></div>
-      <div class="story-head"><h2>${icon('book')}行动记录</h2><div class="story-head-tools"><button id="show-all" class="text-button hidden" data-ui="show-all">显示全部${icon('arrow')}</button><button class="text-button" data-command="查看">重新观察${icon('northeast')}</button></div></div>
-      <div id="story-log" class="story-log" tabindex="0" aria-label="行动记录，可滚动查看">${logHTML(animateFrom)}</div>
+      <div class="story-head"><h2>${icon('book')}此刻的故事</h2><div class="story-head-tools"><button class="text-button" data-ui="history">回看记录${icon('book')}</button><button id="show-all" class="text-button hidden" data-ui="show-all">显示全部${icon('arrow')}</button><button class="text-button" data-command="查看">重新观察${icon('northeast')}</button></div></div>
+      <div id="story-log" class="story-log" tabindex="0" aria-label="本次行动内容">${logHTML(animateFrom)}</div>
       <div class="action-area">${renderEnding(view.ending)}${!view.ending ? `<div class="action-caption"><span>你准备怎么做？</span><span>选择一项行动，继续你的故事</span></div><div class="actions">${actions.map((action, index) => `<button class="action-button ${index === 0 ? 'primary-action' : ''}" data-command="${esc(action.command)}"><span>${esc(action.label)}</span>${icon('arrow')}</button>`).join('')}</div>` : ''}
       <div class="input-hint"><span>只需点击选项 · 阅读与查看不消耗时间</span><button class="text-button" data-ui="contact">${icon('radio')}联系同伴</button></div></div>
     </section><aside class="sidebar" aria-label="行动档案">
       <div class="timer"><div><div class="timer-label">${view.ending ? '这一日的终点' : `距正午 · ${Math.max(0, view.stats.minutesLeft)} 分钟`}</div><div class="timer-value">${clockTime(view.stats.minutesLeft)}<span>12:00 钟响</span></div></div><div class="clock-face" aria-hidden="true"></div></div>
-      <section class="mission"><div class="label">当前目标${icon('diamond')}</div><p>${esc(view.objective)}</p><button class="hint-button" data-ui="hint">${icon('help')}听听队内建议</button></section>
+      <section class="mission"><div class="label">当前目标${icon('diamond')}</div><p>${esc(view.objective)}</p><button class="hint-button" data-ui="hint">${icon('help')}提示 · 下一步</button></section>
       <div class="progress-stats"><div><div class="stat-value">${esc(view.stats.rescued)}<small>/ 27</small></div><div class="stat-label">居民获救</div></div><div><div class="stat-value">${esc(view.stats.evidence)}</div><div class="stat-label">已获证据</div></div><div><div class="stat-value">${esc(view.stats.trust)}<small>/ 4</small></div><div class="stat-label">同伴协同</div></div></div>
       <nav class="panel-tabs" aria-label="行动档案栏目">${[['map','地图'],['bag','背包'],['team','同伴'],['book','日志'],['image','图鉴']].map(([id,label]) => `<button data-panel="${id}" class="${activePanel === id ? 'active' : ''}" aria-pressed="${activePanel === id}">${icon(id)}${label}</button>`).join('')}</nav>
       <div class="panel-content" id="panel-content">${renderPanel(view)}</div>
       <div class="sidebar-footer"><span>博士 · 罗德岛</span><br>白金色的光环照亮道路。选择仍由你作出。</div>
     </aside></main><footer class="footer"><span>第十三声钟响 · violet</span><span>文字探索 / 单人旅程 / 自动存档</span></footer>`;
+  updateGameMarkup(markup);
   const log = document.querySelector('#story-log');
-  log.scrollTop = preserveScroll ? previousScroll : log.scrollHeight;
+  log.scrollTop = preserveScroll ? previousScroll : 0;
   if (focus) document.querySelector('.action-button')?.focus({ preventScroll: true });
   if (Number.isFinite(animateFrom)) typeMessages(animateFrom);
+}
+
+// Keep the game shell and CG image mounted; actions only update changed regions.
+function updateGameMarkup(markup) {
+  if (!root.querySelector('.workspace')) {
+    root.innerHTML=markup;
+    return;
+  }
+  const template=document.createElement('template');
+  template.innerHTML=markup;
+  const next=template.content;
+  const update=selector=>{
+    const current=root.querySelector(selector), incoming=next.querySelector(selector);
+    if (current && incoming && current.innerHTML!==incoming.innerHTML) current.innerHTML=incoming.innerHTML;
+  };
+  for (const selector of ['.saved-status','.chapter-heading','.scene-num','.scene-title',
+    '#story-log','.action-area','.timer','.mission','.progress-stats','.panel-tabs','#panel-content']) update(selector);
+  const scene=root.querySelector('.scene'), incoming=next.querySelector('.scene');
+  scene.dataset.cg=incoming.dataset.cg;
+  scene.setAttribute('aria-label',incoming.getAttribute('aria-label'));
+  const image=scene.querySelector('img'), nextImage=incoming.querySelector('img');
+  if (image.getAttribute('src')!==nextImage.getAttribute('src')) image.src=nextImage.getAttribute('src');
+  image.alt=nextImage.alt;
+}
+
+function showHistory() {
+  stopTyping();
+  showDialog('旅程回看', `<p class="help-intro">之前的对话和行动都留在这里。向上翻阅，关闭后回到当前故事。</p><div class="history-log" tabindex="0" aria-label="历史行动记录">${logHTML(Infinity,true)}</div><div class="button-row history-footer"><button class="secondary" data-ui="close">返回当前故事</button></div>`, 'history-dialog');
+  const log=dialog.querySelector('.history-log');
+  log.scrollTop=log.scrollHeight;
+}
+function showHint() {
+  if (!state) return;
+  stopTyping();
+  const view=Game.getView(state);
+  const hint=view.nextAction;
+  if (view.ending || !hint) return showDialog('旅程已结束', '<p class="help-intro">你已抵达这一日的结局。可以回看记录，或重新启程。</p>');
+  shownHint=hint;
+  for (const button of root.querySelectorAll('.action-button[data-command]')) {
+    const recommended=button.dataset.command===hint.command;
+    button.classList.toggle('recommended',recommended);
+    if (recommended) button.setAttribute('aria-label',`${hint.label}，推荐行动`);
+  }
+  showDialog('下一步建议', `<div class="hint-kicker">推荐选择</div><h3 class="hint-choice">${esc(hint.label)}</h3><p class="hint-reason">${esc(hint.reason)}</p><p class="note">查看提示不消耗行动时间。对应选项已标记为“推荐”。</p><div class="button-row hint-footer"><button class="primary" data-ui="follow-hint">按提示行动${icon('arrow')}</button><button class="secondary" data-ui="close">我自己选</button></div>`, 'hint-dialog');
 }
 
 function renderPanel(view) {
@@ -325,6 +379,8 @@ function run(command, focus = false) {
   const normalized = text.replace(/[，。！？!?]+$/g,'').replace(/\s+/g,'');
   if (/^(重新开始|重开|重来|重新启程|restart)$/i.test(normalized)) return requestNewGame();
   if (/^(帮助|help|\?)$/i.test(text)) return showHelp();
+  if (text==='提示') return showHint();
+  shownHint=null;
   const panels = { 地图:'map', 背包:'bag', 日志:'book', 图鉴:'image' };
   if (panels[text]) activePanel = panels[text];
   const oldView = Game.getView(state);
@@ -365,13 +421,13 @@ function renderIntro() {
       ['菲亚梅塔','掩护与现场处置','她不轻信来路不明的命令。明确目标之后，控制室可以交给她。'],
       ['送葬人','授权核验与证据','印章是真是假，权限到哪里，他都会一项项查清。证据也需要留下副本。'],
     ].map(([name,role,text])=>`<article><span class="initial">${name[0]}</span><div><h3>${name}</h3><small>${role}</small><p>${text}</p></div></article>`).join('')}</div>`},
-    {title:'你的第一份行动简报',kicker:'教程 · 只需点击选项',body:`<div class="tutorial-steps"><article><span>01</span><div><h3>阅读，再选择</h3><p>故事会逐字展开。可点击“显示全部”立即读完，再从下方选项选择行动。</p></div></article><article><span>02</span><div><h3>沿地图探索</h3><p>地点之间需要沿相邻道路移动。检查现场、收集证据，再到背包和日志中回看。</p></div></article><article><span>03</span><div><h3>把合适的任务交给同伴</h3><p>先为救援做好准备，最后安排四位同伴共同解决钟楼危机。调查和选择会改变结局。</p></div></article></div><p class="intro-callout">阅读不会消耗时间。移动和新行动才会让钟表前进。</p><button class="intro-sound" data-ui="intro-sound">${icon('sound')}必要音效：${settings.sound?'已开启':'已关闭'}<span>点击切换</span></button>`},
+    {title:'你的第一份行动简报',kicker:'教程 · 只需点击选项',body:`<div class="tutorial-steps"><article><span>01</span><div><h3>阅读，再选择</h3><p>文本窗只呈现本次行动。点击“显示全部”立即读完，之前的对话可在“回看记录”中翻阅。</p></div></article><article><span>02</span><div><h3>沿地图探索</h3><p>点击下方选项行动，沿地图前往相邻地点。卡住时点击“查看提示”，系统会标出推荐的下一步。</p></div></article><article><span>03</span><div><h3>把合适的任务交给同伴</h3><p>先为救援做好准备，最后安排四位同伴共同解决钟楼危机。调查和选择会改变结局。</p></div></article></div><p class="intro-callout">阅读不会消耗时间。移动和新行动才会让钟表前进。</p><button class="intro-sound" data-ui="intro-sound">${icon('sound')}必要音效：${settings.sound?'已开启':'已关闭'}<span>点击切换</span></button>`},
   ];
   const page=pages[introStep];
   showDialog(page.title,`<div class="eyebrow intro-kicker">${page.kicker}</div>${page.body}<div class="intro-footer"><div class="intro-dots" aria-label="第${introStep+1}步，共3步">${pages.map((_,i)=>`<i class="${i===introStep?'active':''}"></i>`).join('')}</div><div class="button-row">${introStep>0?'<button class="text-button" data-ui="intro-back">上一步</button>':'<button class="text-button" data-ui="close">暂时返回</button>'}<button class="primary" data-ui="${introStep===2?'intro-finish':'intro-next'}">${introStep===2?(introStartsNewGame?'走进清晨':'返回旅程'):'继续'}${icon('arrow')}</button></div></div>`,'intro-dialog');
 }
 function showHelp() {
-  showDialog('游玩指南', `<p class="help-intro">你是拥有白金色光环的罗德岛博士。调查事故、找到失踪居民，与四位同伴阻止钟楼中的危机。整段旅程只需点击选项。</p><div class="help-list"><code>选择行动</code><p>阅读行动记录，在下方选项中选择调查、救援或队员分工。</p><code>探索地图</code><p>点击“前往……”选项，或地图中相邻的可达地点。暗色地点暂时不能抵达。</p><code>联系同伴</code><p>选择一位同伴交谈。能天使、莫斯提马、菲亚梅塔和送葬人都在队内频道。</p><code>背包与日志</code><p>查看收集到的物品与证据。已经完成的行动会记录在日志里。</p><code>听取建议</code><p>没有思路时，点击“听取行动建议”或“听听队内建议”，不消耗时间。</p><code>回望画面</code><p>点击场景插画可放大；图鉴会保留已经解锁的三张 CG。</p></div><p class="note">时间只会随移动和有效行动推进，不会在你阅读时流逝。“原地等待”会推进五分钟。收集与备份证据、完成救援和合理分工，都会影响结局。</p><p class="help-footer">游戏会自动保存到当前浏览器。换设备前，可以在设置中导出存档，再从另一台设备导入。</p><button class="text-button" data-ui="introduction">查看故事与人物介绍 ${icon('arrow')}</button>`);
+  showDialog('游玩指南', `<p class="help-intro">你是拥有白金色光环的罗德岛博士。调查事故、找到失踪居民，与四位同伴阻止钟楼中的危机。整段旅程只需点击选项。</p><div class="help-list"><code>选择行动</code><p>阅读行动记录，在下方选项中选择调查、救援或队员分工。</p><code>探索地图</code><p>点击“前往……”选项，或地图中相邻的可达地点。暗色地点暂时不能抵达。</p><code>联系同伴</code><p>选择一位同伴交谈。能天使、莫斯提马、菲亚梅塔和送葬人都在队内频道。</p><code>背包与日志</code><p>查看收集到的物品与证据。已经完成的行动会记录在日志里。</p><code>查看提示</code><p>卡住时点击“卡住了？查看提示”或“提示 · 下一步”。系统会显示推荐选项和理由，并标记对应按钮；查看不消耗时间。</p><code>回看记录</code><p>文本窗只显示本次行动。点击“回看记录”可翻阅之前的对话和行动，关闭后继续当前故事。</p><code>回望画面</code><p>点击场景插画可放大；图鉴会保留已经解锁的三张 CG。</p></div><p class="note">时间只会随移动和有效行动推进，不会在你阅读时流逝。“原地等待”会推进五分钟。收集与备份证据、完成救援和合理分工，都会影响结局。</p><p class="help-footer">游戏会自动保存到当前浏览器。换设备前，可以在设置中导出存档，再从另一台设备导入。</p><button class="text-button" data-ui="introduction">查看故事与人物介绍 ${icon('arrow')}</button>`);
 }
 function showContacts() {
   if (!state) return;
@@ -423,7 +479,9 @@ document.addEventListener('click', event => {
   if (action === 'show-all') {stopTyping();document.querySelector('#story-log')?.scrollTo({top:document.querySelector('#story-log').scrollHeight});return;}
   if (action === 'settings') return showSettings();
   if (action === 'close') return closeDialog();
-  if (action === 'hint') return run('提示');
+  if (action === 'hint') return showHint();
+  if (action === 'history') return showHistory();
+  if (action === 'follow-hint') { const hint=shownHint; closeDialog(); if(hint) return run(hint.command,true); }
   if (action === 'contact') return showContacts();
   if (action === 'export') return exportSave();
   if (action === 'import') return fileInput.click();
